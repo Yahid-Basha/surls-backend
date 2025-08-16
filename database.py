@@ -2,7 +2,10 @@ import os
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.ext.declarative import declarative_base
+from dotenv import load_dotenv
 
+# Load environment variables from .env file
+load_dotenv()
 # Prefer DATABASE_URL from environment (set by docker-compose), fallback to local default
 SQLALCHEMY_DATABASE_URL = os.getenv(
     'DATABASE_URL',
