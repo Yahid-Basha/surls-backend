@@ -4,6 +4,7 @@ import random
 import requests
 from helpers import sync_visits_to_db, update_visit_in_db
 import redis
+import ssl
 import re
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import RedirectResponse
@@ -33,45 +34,59 @@ REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", None)
 
 print(f"Connecting to Redis at {REDIS_HOST}:{REDIS_PORT} (SSL: {REDIS_SSL})")
 
-# Configure Redis connection with proper timeout and SSL support
+# Configure Redis connection with proper timeout and SSL support for AWS ElastiCache
 redis_config = {
     "host": REDIS_HOST,
     "port": REDIS_PORT,
     "db": 0,
     "decode_responses": True,
-    "socket_timeout": 5,
-    "socket_connect_timeout": 5,
+    "socket_timeout": 10,
+    "socket_connect_timeout": 10,
+    "retry_on_timeout": True,
     "health_check_interval": 30
 }
 
-# Add SSL configuration for AWS ElastiCache
+# Add SSL configuration for AWS ElastiCache Serverless (matches redis-cli --tls)
 if REDIS_SSL:
     redis_config["ssl"] = True
-    redis_config["ssl_cert_reqs"] = None
+    redis_config["ssl_cert_reqs"] = ssl.CERT_NONE  # Equivalent to redis-cli --tls behavior
+    redis_config["ssl_check_hostname"] = False
 
 # Add password if provided
 if REDIS_PASSWORD:
     redis_config["password"] = REDIS_PASSWORD
 
-redis_client = redis.StrictRedis(**redis_config)
+try:
+    redis_client = redis.StrictRedis(**redis_config)
+    print("Redis client created successfully")
+except Exception as e:
+    print(f"Error creating Redis client: {e}")
+    redis_client = None
 
 def check_redis_connection():
     """
     Check if Redis connection is established and working.
     Returns True if connected, False otherwise.
     """
+    if redis_client is None:
+        print("Redis client is not initialized")
+        return False
+    
     try:
         # Ping Redis to verify connection (with timeout)
-        response = redis_client.ping(timeout=2)
+        response = redis_client.ping()
         if response:
             print("Successfully connected to Redis")
             return True
         return False
-    except redis.ConnectionError:
-        print("Failed to connect to Redis")
+    except redis.ConnectionError as e:
+        print(f"Failed to connect to Redis: {e}")
         return False
-    except redis.TimeoutError:
-        print("Redis connection timed out")
+    except redis.TimeoutError as e:
+        print(f"Redis connection timed out: {e}")
+        return False
+    except ssl.SSLError as e:
+        print(f"SSL error connecting to Redis: {e}")
         return False
     except Exception as e:
         print(f"Unexpected error connecting to Redis: {e}")
@@ -107,10 +122,16 @@ def shorten_url(long_url: longUrl, db: Session = Depends(get_db)):
     )
     db.add(short_url_obj)
     db.commit()
-    # Store in Redis
-    redis_client.set(f"short:{short_url_obj.short_url}", short_url_obj.long_url)
-    # Also init visits counter in Redis (set if not exists)
-    redis_client.setnx(f"visits:{short_url_obj.short_url}", short_url_obj.visits or 0)
+    
+    # Store in Redis if available
+    if redis_client:
+        try:
+            redis_client.set(f"short:{short_url_obj.short_url}", short_url_obj.long_url)
+            # Also init visits counter in Redis (set if not exists)
+            redis_client.setnx(f"visits:{short_url_obj.short_url}", short_url_obj.visits or 0)
+        except Exception as e:
+            print(f"Error storing in Redis: {e}")
+    
     return short_url_obj
 
 def short_url_generator(db: Session):
@@ -127,28 +148,39 @@ def redirect_to_long_url(short_url: str, request: Request, background_tasks: Bac
 
     ip = request.headers.get("X-Forwarded-For", request.client.host)
 
-    long_url = redis_client.get(f"short:{short_url}")
-    if long_url:
-        redis_client.incr(f"visits:{short_url}")
-        background_tasks.add_task(
-            update_visit_in_db,
-            short_url,
-            ip,
-            request.headers.get("User-Agent", ""),
-            request.headers.get("Referer", ""),
-            *get_geo_from_ip(ip),
-            db
-        )
-        return RedirectResponse(long_url, status_code=302)
+    # Try Redis first if available
+    long_url = None
+    if redis_client:
+        try:
+            long_url = redis_client.get(f"short:{short_url}")
+            if long_url:
+                redis_client.incr(f"visits:{short_url}")
+                background_tasks.add_task(
+                    update_visit_in_db,
+                    short_url,
+                    ip,
+                    request.headers.get("User-Agent", ""),
+                    request.headers.get("Referer", ""),
+                    *get_geo_from_ip(ip),
+                    db
+                )
+                return RedirectResponse(long_url, status_code=302)
+        except Exception as e:
+            print(f"Error accessing Redis: {e}")
 
-    # Cache miss
+    # Cache miss or Redis unavailable - fallback to database
     short_url_obj = db.query(ShortUrl).filter(ShortUrl.short_url == short_url).first()
     if not short_url_obj:
         raise HTTPException(status_code=404, detail="URL not found")
 
-    redis_client.set(f"short:{short_url}", short_url_obj.long_url)
-    redis_client.set(f"visits:{short_url}", short_url_obj.visits or 0)
-    redis_client.incr(f"visits:{short_url}")
+    # Update Redis cache if available
+    if redis_client:
+        try:
+            redis_client.set(f"short:{short_url}", short_url_obj.long_url)
+            redis_client.set(f"visits:{short_url}", short_url_obj.visits or 0)
+            redis_client.incr(f"visits:{short_url}")
+        except Exception as e:
+            print(f"Error updating Redis cache: {e}")
 
     background_tasks.add_task(
         update_visit_in_db,
