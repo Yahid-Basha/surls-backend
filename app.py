@@ -28,8 +28,32 @@ app = APIRouter()
 
 REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
-print(f"Connecting to Redis at {REDIS_HOST}:{REDIS_PORT}")
-redis_client = redis.StrictRedis(host=REDIS_HOST, port=REDIS_PORT, db=0, decode_responses=True)
+REDIS_SSL = os.getenv("REDIS_SSL", "false").lower() == "true"
+REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", None)
+
+print(f"Connecting to Redis at {REDIS_HOST}:{REDIS_PORT} (SSL: {REDIS_SSL})")
+
+# Configure Redis connection with proper timeout and SSL support
+redis_config = {
+    "host": REDIS_HOST,
+    "port": REDIS_PORT,
+    "db": 0,
+    "decode_responses": True,
+    "socket_timeout": 5,
+    "socket_connect_timeout": 5,
+    "health_check_interval": 30
+}
+
+# Add SSL configuration for AWS ElastiCache
+if REDIS_SSL:
+    redis_config["ssl"] = True
+    redis_config["ssl_cert_reqs"] = None
+
+# Add password if provided
+if REDIS_PASSWORD:
+    redis_config["password"] = REDIS_PASSWORD
+
+redis_client = redis.StrictRedis(**redis_config)
 
 def check_redis_connection():
     """
