@@ -96,6 +96,27 @@ def check_redis_connection():
 connected = check_redis_connection()
 if not connected:
     print(f"WARNING: Could not connect to Redis at {REDIS_HOST}:{REDIS_PORT}")
+else:
+    # Test Redis functionality
+    if redis_client:
+        try:
+            # Test basic operations
+            test_key = "app_test_key"
+            test_value = "app_test_value"
+            redis_client.set(test_key, test_value)
+            retrieved_value = redis_client.get(test_key)
+            print(f"Redis test: Set '{test_key}' = '{test_value}', Retrieved: '{retrieved_value}'")
+            
+            # Check current database
+            info = redis_client.info()
+            print(f"Connected to Redis DB: {redis_config.get('db', 0)}")
+            
+            # List some keys for debugging
+            keys = redis_client.keys("*")
+            print(f"Current keys in Redis DB {redis_config.get('db', 0)}: {keys[:10]}")  # Show first 10 keys
+            
+        except Exception as e:
+            print(f"Error testing Redis: {e}")
 
 def get_geo_from_ip(ip: str):
     try:
@@ -110,6 +131,39 @@ def get_geo_from_ip(ip: str):
 @app.get("/")
 def read_root():
     return {"message": "Hello, World!"}
+
+@app.get("/redis/test")
+def test_redis():
+    """Test endpoint to verify Redis connectivity and operations"""
+    if not redis_client:
+        return {"error": "Redis client not available"}
+    
+    try:
+        # Test basic operations
+        test_key = "manual_test_key"
+        test_value = f"test_value_{random.randint(1000, 9999)}"
+        
+        # Set a value
+        redis_client.set(test_key, test_value)
+        
+        # Get the value back
+        retrieved = redis_client.get(test_key)
+        
+        # Get some info
+        info = redis_client.info()
+        keys = redis_client.keys("*")
+        
+        return {
+            "redis_connected": True,
+            "test_set": test_value,
+            "test_retrieved": retrieved,
+            "db_number": redis_config.get('db', 0),
+            "total_keys": len(keys),
+            "sample_keys": keys[:10],
+            "redis_version": info.get('redis_version', 'unknown')
+        }
+    except Exception as e:
+        return {"error": f"Redis error: {str(e)}"}
 
 @app.post("/url/shorten", response_model=ShortUrlResponse)
 def shorten_url(long_url: longUrl, db: Session = Depends(get_db)):
