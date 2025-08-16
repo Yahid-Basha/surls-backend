@@ -110,10 +110,7 @@ else:
             # Check current database
             info = redis_client.info()
             print(f"Connected to Redis DB: {redis_config.get('db', 0)}")
-            
-            # List some keys for debugging
-            keys = redis_client.keys("*")
-            print(f"Current keys in Redis DB {redis_config.get('db', 0)}: {keys[:10]}")  # Show first 10 keys
+            print(f"Redis info - connected_clients: {info.get('connected_clients', 'unknown')}")
             
         except Exception as e:
             print(f"Error testing Redis: {e}")
@@ -149,18 +146,22 @@ def test_redis():
         # Get the value back
         retrieved = redis_client.get(test_key)
         
-        # Get some info
+        # Get some info (avoid KEYS command which is disabled in ElastiCache Serverless)
         info = redis_client.info()
-        keys = redis_client.keys("*")
+        
+        # Test if we can access a known key pattern
+        test_short_key = "short:testkey"
+        redis_client.set(test_short_key, "http://example.com", ex=60)  # Set with 60s expiration
+        short_test = redis_client.get(test_short_key)
         
         return {
             "redis_connected": True,
             "test_set": test_value,
             "test_retrieved": retrieved,
             "db_number": redis_config.get('db', 0),
-            "total_keys": len(keys),
-            "sample_keys": keys[:10],
-            "redis_version": info.get('redis_version', 'unknown')
+            "short_key_test": short_test,
+            "redis_version": info.get('redis_version', 'unknown'),
+            "note": "KEYS command is disabled in ElastiCache Serverless"
         }
     except Exception as e:
         return {"error": f"Redis error: {str(e)}"}
