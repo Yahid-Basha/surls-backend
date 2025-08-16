@@ -30,9 +30,33 @@ REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
 print(f"Connecting to Redis at {REDIS_HOST}:{REDIS_PORT}")
 redis_client = redis.StrictRedis(host=REDIS_HOST, port=REDIS_PORT, db=0, decode_responses=True)
-if not redis_client.ping():
-    print("Failed to connect to Redis")
-    redis_client = None
+
+def check_redis_connection():
+    """
+    Check if Redis connection is established and working.
+    Returns True if connected, False otherwise.
+    """
+    try:
+        # Ping Redis to verify connection (with timeout)
+        response = redis_client.ping(timeout=2)
+        if response:
+            print("Successfully connected to Redis")
+            return True
+        return False
+    except redis.ConnectionError:
+        print("Failed to connect to Redis")
+        return False
+    except redis.TimeoutError:
+        print("Redis connection timed out")
+        return False
+    except Exception as e:
+        print(f"Unexpected error connecting to Redis: {e}")
+        return False
+
+# Test connection on startup
+connected = check_redis_connection()
+if not connected:
+    print(f"WARNING: Could not connect to Redis at {REDIS_HOST}:{REDIS_PORT}")
 
 def get_geo_from_ip(ip: str):
     try:
