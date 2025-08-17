@@ -15,6 +15,7 @@ from database import engine, get_db, SessionLocal
 from schema import ShortUrlResponse
 from fastapi import BackgroundTasks
 from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.executors.pool import ThreadPoolExecutor
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
@@ -289,17 +290,34 @@ def get_stats(db: Session = Depends(get_db)):
 
 
 # Background job to sync Redis visit counters to DB
-# This will run every 5 minutes to ensure Redis and DB are in sync.
-scheduler = BackgroundScheduler()
-@scheduler.scheduled_job('interval', minutes=5)
+# Configure scheduler with proper job settings to prevent queue backup
+executors = {
+    'default': ThreadPoolExecutor(20),
+}
+job_defaults = {
+    'coalesce': True,         # Combine multiple pending runs into one
+    'max_instances': 1,       # Only allow 1 instance of each job
+    'misfire_grace_time': 30  # Allow up to 30 seconds late execution
+}
+scheduler = BackgroundScheduler(executors=executors, job_defaults=job_defaults)
+
+@scheduler.scheduled_job('interval', minutes=10, id='sync_visits_job')  # Reduced frequency to 10 minutes
 def scheduled_sync_visits_to_db():
     """Background job: open a DB session and sync Redis visit counters to DB."""
+    print("Starting scheduled sync of visit counters...")
     db = SessionLocal()
     try:
         # Use the helper's implementation to avoid duplication.
         sync_visits_to_db(db)
+        print("Completed scheduled sync of visit counters")
+    except Exception as e:
+        print(f"Error in scheduled sync: {e}")
     finally:
         db.close()
 
 # Start scheduler when this module is imported by Uvicorn.
-scheduler.start()
+try:
+    scheduler.start()
+    print("Background scheduler started successfully")
+except Exception as e:
+    print(f"Error starting scheduler: {e}")
