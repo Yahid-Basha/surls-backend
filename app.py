@@ -6,7 +6,8 @@ from helpers import sync_visits_to_db, update_visit_in_db
 import redis
 import ssl
 import re
-from fastapi import APIRouter, Depends, HTTPException, Request
+import logging
+from fastapi import APIRouter, Depends, HTTPException, Request, Header
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -17,6 +18,12 @@ from fastapi import BackgroundTasks
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.executors.pool import ThreadPoolExecutor
 from dotenv import load_dotenv
+from typing import Optional, Dict, Any
+from auth import get_current_user, get_current_user_optional
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Load environment variables from .env file
 load_dotenv()
@@ -130,6 +137,23 @@ def get_geo_from_ip(ip: str):
 def read_root():
     return {"message": "Hello, World!"}
 
+@app.get("/auth/me")
+async def get_current_user_info(current_user: Dict[str, Any] = Depends(get_current_user)):
+    """
+    Get current authenticated user information from JWT token.
+    Requires valid JWT token in Authorization header.
+    Frontend handles all auth flows - this just validates and returns user data.
+    """
+    return {
+        "user_id": current_user["sub"],
+        "username": current_user.get("cognito:username"),
+        "email": current_user.get("email"),
+        "name": current_user.get("name"),
+        "token_use": current_user.get("token_use"),
+        "exp": current_user.get("exp"),
+        "iat": current_user.get("iat")
+    }
+
 @app.get("/redis/test")
 def test_redis():
     """Test endpoint to verify Redis connectivity and operations"""
@@ -168,13 +192,30 @@ def test_redis():
         return {"error": f"Redis error: {str(e)}"}
 
 @app.post("/url/shorten", response_model=ShortUrlResponse)
-def shorten_url(long_url: longUrl, db: Session = Depends(get_db)):
+async def shorten_url(
+    long_url: longUrl, 
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Create a shortened URL. Requires JWT authentication.
+    Only authenticated users can create short URLs.
+    """
+    # Extract user information from JWT
+    user_id = current_user["sub"]  # Cognito user ID
+    username = current_user.get("cognito:username", "unknown")
+    email = current_user.get("email", "unknown")
+    
+    # Log JWT receipt and user info
+    logger.info(f"JWT received and validated successfully. Username: {username}, Email: {email}, User ID: {user_id}")
+    logger.info(f"User {username} is creating a short URL for: {long_url.url}")
+
     short_url = short_url_generator(db)
 
     short_url_obj = ShortUrl(
         short_url=short_url,
         long_url=long_url.url,
-        user_id=None
+        user_id=user_id  # Associate URL with authenticated user
     )
     db.add(short_url_obj)
     db.commit()
@@ -185,9 +226,11 @@ def shorten_url(long_url: longUrl, db: Session = Depends(get_db)):
             redis_client.set(f"short:{short_url_obj.short_url}", short_url_obj.long_url)
             # Also init visits counter in Redis (set if not exists)
             redis_client.setnx(f"visits:{short_url_obj.short_url}", short_url_obj.visits or 0)
+            logger.info(f"Short URL {short_url} cached in Redis for user {username}")
         except Exception as e:
-            print(f"Error storing in Redis: {e}")
+            logger.error(f"Error storing in Redis: {e}")
     
+    logger.info(f"Short URL created successfully: {short_url} -> {long_url.url} for user {username}")
     return short_url_obj
 
 def short_url_generator(db: Session):
@@ -252,41 +295,44 @@ def redirect_to_long_url(short_url: str, request: Request, background_tasks: Bac
 
 
 @app.get("/usr/{uid}")
-def get_stats(uid: str, db: Session = Depends(get_db)):
+async def get_stats(uid: str, db: Session = Depends(get_db), current_user: Dict[str, Any] = Depends(get_current_user)):
+    """
+    Get user statistics. Requires authentication.
+    User can only access their own statistics.
+    """
+    # Verify the requested user_id matches the authenticated user
+    if current_user["sub"] != uid:
+        raise HTTPException(status_code=403, detail="Access denied: You can only view your own statistics")
+    
+    username = current_user.get("cognito:username", "unknown")
+    print(f"Fetching stats for authenticated user: {username} (ID: {uid})")
+    
     short_url_obj = db.query(ShortUrl).filter(ShortUrl.user_id == uid).all()
     
     if not short_url_obj:
-        raise HTTPException(status_code=404, detail="User not found")
+        return {"message": "No URLs found for this user", "urls": []}
 
     stats = []
     for url in short_url_obj:
         visits_obj = db.query(Visit).filter(Visit.short_url_id == url.id).order_by(Visit.visit_time.desc())
         if visits_obj.count() == 0:
-            stats.append({"long_url": url.long_url, "visits": url.visits, "recent visits":[]})
+            stats.append({
+                "short_url": url.short_url,
+                "long_url": url.long_url, 
+                "visits": url.visits, 
+                "created_at": url.created_at,
+                "recent_visits": []
+            })
         else:
-            stats.append({"long_url": url.long_url, "visits": url.visits, "recent visits": visits_obj.all()})
+            stats.append({
+                "short_url": url.short_url,
+                "long_url": url.long_url, 
+                "visits": url.visits, 
+                "created_at": url.created_at,
+                "recent_visits": visits_obj.all()
+            })
 
-    return stats
-
-#temporary to check for above logic's ability
-@app.get("/url/stats")
-def get_stats(db: Session = Depends(get_db)):
-    short_url_obj = db.query(ShortUrl).filter(ShortUrl.user_id == None).all()
-
-    if not short_url_obj:
-        return {"urls": []}
-
-    stats = []
-    for url in short_url_obj:
-        visits_obj = db.query(Visit).filter(Visit.short_url_id == url.id).order_by(Visit.visit_time.desc())
-        stats.append({
-            "short_url": url.short_url,
-            "long_url": url.long_url, 
-            "visits": url.visits, 
-            "recent_visits": visits_obj.all()
-        })
-
-    return {"urls": stats}
+    return {"user_id": uid, "urls": stats}
 
 
 # Background job to sync Redis visit counters to DB
